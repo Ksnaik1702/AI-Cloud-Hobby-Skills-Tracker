@@ -1,0 +1,85 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function owns(data) { return signedIn() && data.userId == request.auth.uid; }
+    function ownsSkill(skillId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/skills/$(skillId))
+        && get(/databases/$(database)/documents/skills/$(skillId)).data.userId == request.auth.uid;
+    }
+
+    match /handles/{handle} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create: if signedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if false;
+      allow delete: if owns(resource.data);
+    }
+
+    match /profiles/{uid} {
+      allow read, create, update, delete: if signedIn() && request.auth.uid == uid;
+    }
+
+    match /skills/{skillId} {
+      allow read: if owns(resource.data);
+      allow create: if owns(request.resource.data)
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.name.size() <= 80;
+      allow update: if owns(resource.data) && owns(request.resource.data);
+      allow delete: if owns(resource.data);
+    }
+
+    match /goals/{goalId} {
+      allow read: if owns(resource.data);
+      allow create: if owns(request.resource.data)
+        && request.resource.data.target is number
+        && request.resource.data.target > 0
+        && ownsSkill(request.resource.data.skillId);
+      allow update: if owns(resource.data) && owns(request.resource.data);
+      allow delete: if owns(resource.data);
+    }
+
+    match /practice/{sessionId} {
+      allow read: if owns(resource.data);
+      allow create: if owns(request.resource.data)
+        && request.resource.data.minutes is int
+        && request.resource.data.minutes > 0
+        && request.resource.data.minutes <= 1440
+        && ownsSkill(request.resource.data.skillId);
+      allow update: if owns(resource.data) && owns(request.resource.data);
+      allow delete: if owns(resource.data);
+    }
+
+    match /posts/{postId} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.content is string
+        && request.resource.data.content.size() > 0
+        && request.resource.data.content.size() <= 1000;
+      allow update: if false;
+      allow delete: if owns(resource.data);
+
+      match /likes/{uid} {
+        allow read: if signedIn();
+        allow create: if signedIn() && request.auth.uid == uid
+          && request.resource.data.userId == request.auth.uid;
+        allow delete: if signedIn() && request.auth.uid == uid;
+        allow update: if false;
+      }
+
+      match /comments/{commentId} {
+        allow read: if signedIn();
+        allow create: if signedIn()
+          && request.resource.data.userId == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 500;
+        allow update: if false;
+        allow delete: if owns(resource.data);
+      }
+    }
+  }
+}

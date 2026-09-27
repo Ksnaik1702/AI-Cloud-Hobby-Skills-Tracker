@@ -1,0 +1,2 @@
+# The local MVP uses only the Python standard library.
+# Cloud SDKs will be added as pinned dependencies during the Firebase milestone.

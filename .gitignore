@@ -1,0 +1,13 @@
+.env
+frontend/firebase-config.js
+__pycache__/
+*.py[cod]
+backend/data/
+backend/uploads/
+node_modules/
+dist/
+.DS_Store
+.firebase/
+firebase-debug.log
+*-debug.log
+tests/test-*.db
