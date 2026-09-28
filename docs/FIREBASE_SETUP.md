@@ -22,7 +22,7 @@ Cloud mode uses the Firebase browser SDK directly. The Python REST API is for th
 
 Do not enable Cloud Storage for this project while staying on Firebase's Spark plan. Firebase requires Blaze billing to provision/use Cloud Storage for Firebase as of February 3, 2026. Blaze is usage-based and requires a linked billing account; usage can incur charges. Cloud Storage Always Free quotas apply only in the US-CENTRAL1, US-EAST1, and US-WEST1 regions. A Firestore database set to Mumbai does not by itself tell us the region a future Storage bucket would use. See the official [Firebase Storage FAQ](https://firebase.google.com/docs/storage/faqs-storage-changes-announced-sept-2024) and [Cloud Storage pricing](https://cloud.google.com/storage/pricing).
 
-On the free-tier setup, cloud posts are text-only. The local demo continues to support image uploads. The project does not deploy Storage rules or make Storage requests in cloud mode.
+The app has no photo upload option in either cloud or local demo mode. It does not deploy Storage rules or make Storage requests.
 
 ## Deploy the website
 
@@ -38,7 +38,7 @@ Firebase Hosting deploys only static assets. Cloud mode currently calls Auth and
 
 ## Verify the live app
 
-Open the Hosting URL and create a test account. Add a skill, create a goal, log a practice session, and publish a text post. Confirm the records in Firestore. Cloud image uploads are intentionally unavailable in the free-tier configuration. Use local demo mode to demonstrate image attachments.
+Open the Hosting URL and create a test account. Add a skill, create a goal, log a practice session, and publish a text post. Confirm the records in Firestore. Community posts are text-only in both modes.
 
 ## Local mode
 

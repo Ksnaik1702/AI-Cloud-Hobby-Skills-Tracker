@@ -5,21 +5,21 @@ from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
+from contextlib import contextmanager
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = Path(__file__).resolve().parent / "data"
-UPLOADS = Path(__file__).resolve().parent / "uploads"
 DB = DATA / "hobbyloop.db"
-DATA.mkdir(exist_ok=True); UPLOADS.mkdir(exist_ok=True)
+DATA.mkdir(exist_ok=True)
 SECRET = os.getenv("HOBBYLOOP_SECRET", "local-demo-only-change-before-deploy").encode()
 
 SCHEMA = """
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, username TEXT UNIQUE NOT NULL, name TEXT NOT NULL, password_hash TEXT NOT NULL, bio TEXT DEFAULT '', interests TEXT DEFAULT '', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS skills(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, category TEXT NOT NULL, level TEXT NOT NULL, target_level TEXT NOT NULL, description TEXT DEFAULT '', status TEXT NOT NULL DEFAULT 'ACTIVE', created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS goals(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE, title TEXT NOT NULL, target REAL NOT NULL, unit TEXT NOT NULL, deadline TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS goals(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE, title TEXT NOT NULL, target REAL NOT NULL, unit TEXT NOT NULL, deadline TEXT, created_at TEXT NOT NULL, milestones TEXT NOT NULL DEFAULT '[25,50,75,100]');
 CREATE TABLE IF NOT EXISTS practice(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE, minutes INTEGER NOT NULL, activity TEXT NOT NULL, notes TEXT DEFAULT '', practiced_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS posts(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, skill_id TEXT REFERENCES skills(id) ON DELETE SET NULL, content TEXT NOT NULL, media_name TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS posts(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, skill_id TEXT REFERENCES skills(id) ON DELETE SET NULL, content TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS likes(post_id TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at TEXT NOT NULL, PRIMARY KEY(post_id,user_id));
 CREATE TABLE IF NOT EXISTS comments(id TEXT PRIMARY KEY, post_id TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, text TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_practice_user_date ON practice(user_id, practiced_at);
@@ -28,6 +28,17 @@ CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at DESC);
 
 def connect():
     db=sqlite3.connect(DB); db.row_factory=sqlite3.Row; db.execute("PRAGMA foreign_keys=ON"); return db
+@contextmanager
+def db_session():
+    db=connect()
+    try:
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 def now(): return datetime.now(timezone.utc).isoformat()
 def uid(): return secrets.token_urlsafe(12)
 def row(r): return dict(r) if r else None
@@ -51,8 +62,10 @@ def token_user(value):
     except Exception: return None
 
 def init():
-    with connect() as db:
+    with db_session() as db:
         db.executescript(SCHEMA)
+        if 'milestones' not in {r['name'] for r in db.execute('PRAGMA table_info(goals)')}:
+            db.execute("ALTER TABLE goals ADD COLUMN milestones TEXT NOT NULL DEFAULT '[25,50,75,100]'")
         if db.execute('SELECT COUNT(*) FROM posts').fetchone()[0]==0:
             samples=[('Maya Chen','mayamakes','Painting','A tiny reminder that progress is still progress. Finished the first color study for my weekend series. 🎨'),('Arjun Rao','arjun.codes','Coding','Built my first little weather dashboard this week. The best part was finally understanding async requests.'),('Sam Rivera','sam.moves','Fitness','Back to a steady routine: three short sessions this week, and it feels good to show up.')]
             for name,handle,skill,content in samples:
@@ -62,7 +75,7 @@ def init():
                 sk=db.execute('SELECT id FROM skills WHERE user_id=? AND name=?',(user['id'],skill)).fetchone()
                 if not sk:
                     sid=uid(); db.execute('INSERT INTO skills VALUES(?,?,?,?,?,?,?,?,?)',(sid,user['id'],skill,skill,'BEGINNER','ADVANCED','Synthetic community demo profile','ACTIVE',now())); sk={'id':sid}
-                db.execute('INSERT INTO posts VALUES(?,?,?,?,?,?)',(uid(),user['id'],sk['id'],content,None,now()))
+                db.execute('INSERT INTO posts(id,user_id,skill_id,content,created_at) VALUES(?,?,?,?,?)',(uid(),user['id'],sk['id'],content,now()))
 
 class Handler(BaseHTTPRequestHandler):
     server_version='Hobbyloop/0.1'
@@ -87,15 +100,13 @@ class Handler(BaseHTTPRequestHandler):
     def route(self,method):
       try:
         path=urlparse(self.path).path; bits=[b for b in path.split('/') if b]; data=self.body() if method in ('POST','PUT') and not path.startswith('/api/files/') else {}; user=self.auth(path.startswith('/api') and path not in ('/api/feed','/api/health','/api/auth/register','/api/auth/login'))
-        with connect() as db:
+        with db_session() as db:
           if path=='/' or path=='/index.html':
             f=(ROOT/'frontend'/'index.html').read_bytes(); return self.send(200,f,'text/html; charset=utf-8')
           if path.startswith('/frontend/') or path in {'/app.js','/styles.css','/firebase-config.js','/firebase-cloud.js'}:
             asset=Path(path).name
             if asset not in {'app.js','styles.css','firebase-config.js','firebase-cloud.js'}: return self.json_error(404,'Asset not found.')
             f=(ROOT/'frontend'/asset).read_bytes(); return self.send(200,f,mimetypes.guess_type(path)[0] or 'application/octet-stream')
-          if path.startswith('/uploads/'):
-            name=Path(path).name; f=(UPLOADS/name).read_bytes(); return self.send(200,f,mimetypes.guess_type(name)[0] or 'application/octet-stream')
           if path=='/api/auth/register' and method=='POST':
             email=str(data.get('email','')).strip().lower(); name=str(data.get('name','')).strip(); username=str(data.get('username','')).strip().lower(); password=str(data.get('password',''))
             if not name or not email or '@' not in email or len(username)<3 or len(password)<8: return self.json_error(400,'Enter a name, valid email, username (3+ characters), and password (8+ characters).')
@@ -113,14 +124,32 @@ class Handler(BaseHTTPRequestHandler):
             sid=uid(); name=str(data.get('name','')).strip();
             if not name: return self.json_error(400,'Skill name is required.')
             db.execute('INSERT INTO skills VALUES(?,?,?,?,?,?,?,?,?)',(sid,user,name[:80],str(data.get('category','Other'))[:40],data.get('level','BEGINNER'),data.get('target_level','ADVANCED'),str(data.get('description',''))[:500],'ACTIVE',now())); return self.send(201,row(db.execute('SELECT * FROM skills WHERE id=?',(sid,)).fetchone()))
+          if len(bits)==3 and bits[:2]==['api','skills'] and method=='PUT':
+            name=str(data.get('name','')).strip(); level=str(data.get('level','BEGINNER')).upper(); target_level=str(data.get('target_level','ADVANCED')).upper(); status=str(data.get('status','ACTIVE')).upper()
+            if not name: return self.json_error(400,'Skill name is required.')
+            if level not in {'BEGINNER','INTERMEDIATE','ADVANCED'} or target_level not in {'BEGINNER','INTERMEDIATE','ADVANCED'}: return self.json_error(400,'Choose a valid skill level.')
+            if status not in {'ACTIVE','PAUSED','COMPLETED'}: return self.json_error(400,'Choose a valid skill status.')
+            cur=db.execute('UPDATE skills SET name=?,category=?,level=?,target_level=?,description=?,status=? WHERE id=? AND user_id=?',(name[:80],str(data.get('category','Other'))[:40],level,target_level,str(data.get('description',''))[:500],status,bits[2],user))
+            if not cur.rowcount: return self.json_error(404,'Skill not found.')
+            return self.send(200,row(db.execute('SELECT * FROM skills WHERE id=?',(bits[2],)).fetchone()))
           if len(bits)==3 and bits[:2]==['api','skills'] and method=='DELETE':
             cur=db.execute('DELETE FROM skills WHERE id=? AND user_id=?',(bits[2],user)); return self.send(200,{'ok':bool(cur.rowcount)})
           if path=='/api/goals' and method=='GET':
-            return self.send(200,[dict(r)|{'current':r['current'] or 0,'progress':progress_percent(r['current'] or 0, r['target'])} for r in db.execute('SELECT g.*,s.name skill_name,(SELECT SUM(minutes)/60.0 FROM practice p WHERE p.skill_id=g.skill_id AND p.user_id=g.user_id) current FROM goals g JOIN skills s ON s.id=g.skill_id WHERE g.user_id=? ORDER BY g.created_at DESC',(user,))])
+            return self.send(200,[dict(r)|{'current':r['current'] or 0,'progress':progress_percent(r['current'] or 0, r['target']),'milestones':json.loads(r['milestones'] or '[25,50,75,100]')} for r in db.execute('SELECT g.*,s.name skill_name,(SELECT SUM(minutes)/60.0 FROM practice p WHERE p.skill_id=g.skill_id AND p.user_id=g.user_id) current FROM goals g JOIN skills s ON s.id=g.skill_id WHERE g.user_id=? ORDER BY g.created_at DESC',(user,))])
           if path=='/api/goals' and method=='POST':
-            gid=uid(); target=float(data.get('target',0)); sk=db.execute('SELECT id FROM skills WHERE id=? AND user_id=?',(data.get('skill_id'),user)).fetchone()
+            gid=uid(); target=float(data.get('target',0)); sk=db.execute('SELECT id FROM skills WHERE id=? AND user_id=?',(data.get('skill_id'),user)).fetchone(); marks=data.get('milestones',[25,50,75,100])
             if not sk or target<=0: return self.json_error(400,'Choose one of your skills and enter a target above zero.')
-            db.execute('INSERT INTO goals VALUES(?,?,?,?,?,?,?,?)',(gid,user,data.get('skill_id'),str(data.get('title','Practice goal'))[:120],target,str(data.get('unit','hours'))[:24],data.get('deadline'),now())); return self.send(201,{'id':gid})
+            if not isinstance(marks,list) or not marks or len(marks)>8 or any(not isinstance(n,int) or n<1 or n>100 for n in marks) or len(set(marks))!=len(marks): return self.json_error(400,'Choose 1–8 unique milestone percentages from 1 to 100.')
+            db.execute('INSERT INTO goals(id,user_id,skill_id,title,target,unit,deadline,created_at,milestones) VALUES(?,?,?,?,?,?,?,?,?)',(gid,user,data.get('skill_id'),str(data.get('title','Practice goal'))[:120],target,str(data.get('unit','hours'))[:24],data.get('deadline'),now(),json.dumps(sorted(marks)))); return self.send(201,{'id':gid})
+          if len(bits)==3 and bits[:2]==['api','goals'] and method=='PUT':
+            target=float(data.get('target',0)); sk=db.execute('SELECT id FROM skills WHERE id=? AND user_id=?',(data.get('skill_id'),user)).fetchone(); marks=data.get('milestones',[25,50,75,100])
+            if not sk or target<=0: return self.json_error(400,'Choose one of your skills and enter a target above zero.')
+            if not isinstance(marks,list) or not marks or len(marks)>8 or any(not isinstance(n,int) or n<1 or n>100 for n in marks) or len(set(marks))!=len(marks): return self.json_error(400,'Choose 1–8 unique milestone percentages from 1 to 100.')
+            cur=db.execute('UPDATE goals SET skill_id=?,title=?,target=?,unit=?,deadline=?,milestones=? WHERE id=? AND user_id=?',(data.get('skill_id'),str(data.get('title','Practice goal'))[:120],target,str(data.get('unit','hours'))[:24],data.get('deadline') or '',json.dumps(sorted(marks)),bits[2],user))
+            if not cur.rowcount: return self.json_error(404,'Goal not found.')
+            return self.send(200,{'ok':True})
+          if len(bits)==3 and bits[:2]==['api','goals'] and method=='DELETE':
+            cur=db.execute('DELETE FROM goals WHERE id=? AND user_id=?',(bits[2],user)); return self.send(200,{'ok':bool(cur.rowcount)})
           if path=='/api/practice' and method=='GET':
             return self.send(200,[dict(r) for r in db.execute('SELECT p.*,s.name skill_name FROM practice p JOIN skills s ON s.id=p.skill_id WHERE p.user_id=? ORDER BY practiced_at DESC LIMIT 30',(user,))])
           if path=='/api/practice' and method=='POST':
@@ -131,15 +160,15 @@ class Handler(BaseHTTPRequestHandler):
           if path=='/api/feed' and method=='GET':
             q=parse_qs(urlparse(self.path).query); limit=min(30,max(1,int(q.get('limit',['20'])[0]))); offset=max(0,int(q.get('offset',['0'])[0]))
             posts=[]
-            for r in db.execute('SELECT p.*,u.name,u.username,s.name skill_name,(SELECT COUNT(*) FROM likes l WHERE l.post_id=p.id) likes,(SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id) comments,EXISTS(SELECT 1 FROM likes l WHERE l.post_id=p.id AND l.user_id=?) liked FROM posts p JOIN users u ON u.id=p.user_id LEFT JOIN skills s ON s.id=p.skill_id ORDER BY p.created_at DESC LIMIT ? OFFSET ?',(user,limit,offset)):
+            for r in db.execute('SELECT p.id,p.user_id,p.skill_id,p.content,p.created_at,u.name,u.username,s.name skill_name,s.category skill_category,(SELECT COUNT(*) FROM likes l WHERE l.post_id=p.id) likes,(SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id) comments,EXISTS(SELECT 1 FROM likes l WHERE l.post_id=p.id AND l.user_id=?) liked FROM posts p JOIN users u ON u.id=p.user_id LEFT JOIN skills s ON s.id=p.skill_id ORDER BY p.created_at DESC LIMIT ? OFFSET ?',(user,limit,offset)):
               posts.append(dict(r))
             return self.send(200,posts)
           if path=='/api/posts' and method=='POST':
             content=str(data.get('content','')).strip()
             if not content or len(content)>1000: return self.json_error(400,'Write a post (up to 1,000 characters).')
-            skill=db.execute('SELECT id FROM skills WHERE id=? AND user_id=?',(data.get('skill_id'),user)).fetchone() if data.get('skill_id') else None
-            media=data.get('media_url'); media=Path(str(media)).name if isinstance(media,str) and str(media).startswith('/uploads/') else None
-            pid=uid(); db.execute('INSERT INTO posts VALUES(?,?,?,?,?,?)',(pid,user,skill['id'] if skill else None,content,('/uploads/'+media) if media else None,now())); return self.send(201,{'id':pid})
+            skill_id=data.get('skill_id'); skill=db.execute('SELECT id FROM skills WHERE id=? AND user_id=?',(skill_id,user)).fetchone() if skill_id else None
+            if skill_id and not skill: return self.json_error(400,'Choose one of your own skills.')
+            pid=uid(); db.execute('INSERT INTO posts(id,user_id,skill_id,content,created_at) VALUES(?,?,?,?,?)',(pid,user,skill['id'] if skill else None,content,now())); return self.send(201,{'id':pid})
           if len(bits)==4 and bits[:2]==['api','posts'] and bits[3]=='like' and method=='POST':
             db.execute('INSERT OR IGNORE INTO likes VALUES(?,?,?)',(bits[2],user,now())); return self.send(200,{'ok':True})
           if len(bits)==4 and bits[:2]==['api','posts'] and bits[3]=='like' and method=='DELETE':
@@ -152,7 +181,6 @@ class Handler(BaseHTTPRequestHandler):
             cid=uid(); db.execute('INSERT INTO comments VALUES(?,?,?,?,?)',(cid,bits[2],user,text,now())); return self.send(201,{'id':cid})
           if len(bits)==3 and bits[:2]==['api','posts'] and method=='DELETE':
             cur=db.execute('DELETE FROM posts WHERE id=? AND user_id=?',(bits[2],user)); return self.send(200,{'ok':bool(cur.rowcount)})
-          if path=='/api/files/upload' and method=='POST': return self.upload(user)
           if path=='/api/health': return self.send(200,{'status':'ok','mode':'local'})
           if path.startswith('/api/'): return self.json_error(404,'That API route was not found.')
           return self.json_error(404,'Page not found.')
@@ -161,18 +189,6 @@ class Handler(BaseHTTPRequestHandler):
       except (ValueError,TypeError,KeyError) as e: self.json_error(400,str(e) or 'Invalid request.')
       except FileNotFoundError: self.json_error(404,'File not found.')
       except Exception as e: print('API error:',repr(e)); self.json_error(500,'Something went wrong. Please try again.')
-    def upload(self,user):
-      length=int(self.headers.get('Content-Length','0'))
-      if length>5_000_000: return self.json_error(413,'File must be smaller than 5 MB.')
-      kind=self.headers.get('Content-Type',''); boundary=kind.split('boundary=')[-1].encode(); raw=self.rfile.read(length)
-      parts=raw.split(b'--'+boundary)
-      part=next((p for p in parts if b'filename=' in p),None)
-      if not part: return self.json_error(400,'Choose an image to upload.')
-      head,payload=part.split(b'\r\n\r\n',1); payload=payload.rsplit(b'\r\n',1)[0]
-      filename=head.decode('latin1').split('filename="')[-1].split('"')[0]; ext=Path(filename).suffix.lower()
-      allowed={'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp'}
-      if ext not in allowed or len(payload)>4_500_000: return self.json_error(400,'Upload a PNG, JPG, or WebP image under 4.5 MB.')
-      stored=uid()+ext; (UPLOADS/stored).write_bytes(payload); return self.send(201,{'url':'/uploads/'+stored,'name':Path(filename).name})
     def analytics(self,db,user):
       total=db.execute('SELECT COALESCE(SUM(minutes),0) FROM practice WHERE user_id=?',(user,)).fetchone()[0]
       skills=[dict(r) for r in db.execute('SELECT s.id,s.name,s.category,s.level,s.status,COALESCE(SUM(p.minutes),0) minutes FROM skills s LEFT JOIN practice p ON p.skill_id=s.id WHERE s.user_id=? GROUP BY s.id ORDER BY minutes DESC',(user,))]
@@ -180,14 +196,27 @@ class Handler(BaseHTTPRequestHandler):
       streak=0; cursor=date.today()
       if cursor.isoformat() not in days: cursor-=timedelta(days=1)
       while cursor.isoformat() in days: streak+=1; cursor-=timedelta(days=1)
+      ordered=sorted(date.fromisoformat(d) for d in days); longest=run=0; previous=None
+      for practiced in ordered:
+        run=run+1 if previous and practiced==(previous+timedelta(days=1)) else 1
+        longest=max(longest,run); previous=practiced
       since=(datetime.now(timezone.utc)-timedelta(days=6)).isoformat()
       weekly=[dict(r) for r in db.execute("SELECT date(practiced_at) day,SUM(minutes) minutes FROM practice WHERE user_id=? AND practiced_at>=? GROUP BY day ORDER BY day",(user,since))]
       goals=db.execute('SELECT COUNT(*) n FROM goals WHERE user_id=?',(user,)).fetchone()['n']
       completed=sum(1 for g in db.execute('SELECT target,(SELECT COALESCE(SUM(minutes)/60.0,0) FROM practice p WHERE p.user_id=goals.user_id AND p.skill_id=goals.skill_id) current FROM goals WHERE user_id=?',(user,)) if g['current']>=g['target'])
-      return {'total_minutes':total,'total_hours':round(total/60,1),'active_skills':sum(1 for s in skills if s['status']=='ACTIVE'),'skills':skills,'weekly':weekly,'streak':streak,'goals_total':goals,'goals_completed':completed,'recent': [dict(r) for r in db.execute('SELECT p.*,s.name skill_name FROM practice p JOIN skills s ON s.id=p.skill_id WHERE p.user_id=? ORDER BY practiced_at DESC LIMIT 5',(user,))]}
+      month_date=datetime.now(timezone.utc).date().replace(day=1)
+      next_month=(month_date.replace(day=28)+timedelta(days=4)).replace(day=1)
+      month_minutes=db.execute('SELECT COALESCE(SUM(minutes),0) FROM practice WHERE user_id=? AND date(practiced_at)>=? AND date(practiced_at)<?',(user,month_date.isoformat(),next_month.isoformat())).fetchone()[0]
+      month_series=[]
+      for back in range(5,-1,-1):
+        d=date.today().replace(day=1)
+        for _ in range(back): d=(d-timedelta(days=1)).replace(day=1)
+        nxt=(d.replace(day=28)+timedelta(days=4)).replace(day=1)
+        mins=db.execute('SELECT COALESCE(SUM(minutes),0) FROM practice WHERE user_id=? AND date(practiced_at)>=? AND date(practiced_at)<?',(user,d.isoformat(),nxt.isoformat())).fetchone()[0]
+        month_series.append({'month':d.strftime('%b'),'minutes':mins})
+      return {'total_minutes':total,'total_hours':round(total/60,1),'month_minutes':month_minutes,'month_series':month_series,'longest_streak':longest,'active_skills':sum(1 for s in skills if s['status']=='ACTIVE'),'skills':skills,'weekly':weekly,'streak':streak,'goals_total':goals,'goals_completed':completed,'recent': [dict(r) for r in db.execute('SELECT p.*,s.name skill_name FROM practice p JOIN skills s ON s.id=p.skill_id WHERE p.user_id=? ORDER BY practiced_at DESC LIMIT 5',(user,))]}
 
 if __name__=='__main__':
     init(); host=os.getenv('HOBBYLOOP_HOST','127.0.0.1'); port=int(os.getenv('HOBBYLOOP_PORT','8000'))
     print(f'Hobbyloop is running at http://{host}:{port}')
     ThreadingHTTPServer((host,port),Handler).serve_forever()
-

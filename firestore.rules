@@ -58,7 +58,9 @@ service cloud.firestore {
         && request.resource.data.userId == request.auth.uid
         && request.resource.data.content is string
         && request.resource.data.content.size() > 0
-        && request.resource.data.content.size() <= 1000;
+        && request.resource.data.content.size() <= 1000
+        && (!('skillId' in request.resource.data) || request.resource.data.skillId == null || ownsSkill(request.resource.data.skillId))
+        && (!('skillName' in request.resource.data) || (request.resource.data.skillName is string && request.resource.data.skillName.size() <= 80));
       allow update: if false;
       allow delete: if owns(resource.data);
 

@@ -82,6 +82,17 @@
       return Object.assign({ id: ref.id }, value);
     }
     const parts = path.split('/').filter(Boolean);
+    if (parts[1] === 'skills' && parts.length === 3 && method === 'PUT') {
+      const ref = store.doc(db, 'skills', parts[2]);
+      const snap = await store.getDoc(ref);
+      if (!snap.exists() || snap.data().userId !== uid) throw new Error('Skill not found.');
+      const value = { name: String(body.name || '').trim().slice(0, 80), category: String(body.category || 'Other').slice(0, 40), level: String(body.level || 'BEGINNER').toUpperCase(), target_level: String(body.target_level || 'ADVANCED').toUpperCase(), description: String(body.description || '').slice(0, 500), status: String(body.status || 'ACTIVE').toUpperCase() };
+      if (!value.name) throw new Error('Skill name is required.');
+      if (!['BEGINNER','INTERMEDIATE','ADVANCED'].includes(value.level) || !['BEGINNER','INTERMEDIATE','ADVANCED'].includes(value.target_level)) throw new Error('Choose a valid skill level.');
+      if (!['ACTIVE','PAUSED','COMPLETED'].includes(value.status)) throw new Error('Choose a valid skill status.');
+      await store.setDoc(ref, value, { merge: true });
+      return Object.assign({ id: ref.id, userId: uid }, value);
+    }
     if (parts[1] === 'skills' && parts.length === 3 && method === 'DELETE') {
       const goals = await owned('goals', uid);
       const sessions = await owned('practice', uid);
@@ -98,15 +109,33 @@
       return goals.map(g => {
         const s = skills.find(x => x.id === g.skillId);
         const current = sessions.filter(p => p.skillId === g.skillId).reduce((n, p) => n + Number(p.minutes || 0), 0) / 60;
-        return Object.assign({}, g, { skill_name: s ? s.name : 'Skill', current: current, progress: g.target ? Math.min(100, Math.round(current / g.target * 100)) : 0 });
+        return Object.assign({}, g, { milestones: g.milestones || [25,50,75,100], skill_name: s ? s.name : 'Skill', current: current, progress: g.target ? Math.min(100, Math.round(current / g.target * 100)) : 0 });
       });
     }
     if (path === '/api/goals' && method === 'POST') {
       const ref = store.doc(store.collection(db, 'goals'));
-      const value = { userId: uid, skillId: body.skill_id, title: body.title || 'Practice goal', target: Number(body.target), unit: 'hours', deadline: body.deadline || '', createdAt: new Date().toISOString() };
+      const value = { userId: uid, skillId: body.skill_id, title: body.title || 'Practice goal', target: Number(body.target), unit: 'hours', deadline: body.deadline || '', milestones: body.milestones || [25,50,75,100], createdAt: new Date().toISOString() };
       if (!value.skillId || value.target <= 0) throw new Error('Choose a skill and enter a target above zero.');
+      if (!Array.isArray(value.milestones) || !value.milestones.length || value.milestones.length > 8 || value.milestones.some(n => !Number.isInteger(n) || n < 1 || n > 100) || new Set(value.milestones).size !== value.milestones.length) throw new Error('Choose 1–8 unique milestone percentages from 1 to 100.');
       await store.setDoc(ref, value);
       return { id: ref.id };
+    }
+    if (parts[1] === 'goals' && parts.length === 3 && method === 'PUT') {
+      const ref = store.doc(db, 'goals', parts[2]);
+      const previous = await store.getDoc(ref);
+      if (!previous.exists() || previous.data().userId !== uid) throw new Error('Goal not found.');
+      const value = { skillId: body.skill_id, title: String(body.title || 'Practice goal').slice(0, 120), target: Number(body.target), unit: 'hours', deadline: body.deadline || '', milestones: body.milestones || [25,50,75,100] };
+      if (!value.skillId || value.target <= 0) throw new Error('Choose a skill and enter a target above zero.');
+      if (!Array.isArray(value.milestones) || !value.milestones.length || value.milestones.length > 8 || value.milestones.some(n => !Number.isInteger(n) || n < 1 || n > 100) || new Set(value.milestones).size !== value.milestones.length) throw new Error('Choose 1–8 unique milestone percentages from 1 to 100.');
+      await store.setDoc(ref, value, { merge: true });
+      return { ok: true };
+    }
+    if (parts[1] === 'goals' && parts.length === 3 && method === 'DELETE') {
+      const ref = store.doc(db, 'goals', parts[2]);
+      const previous = await store.getDoc(ref);
+      if (!previous.exists() || previous.data().userId !== uid) return { ok: false };
+      await store.deleteDoc(ref);
+      return { ok: true };
     }
     if (path === '/api/practice' && method === 'GET') {
       const sessions = await owned('practice', uid);
@@ -145,7 +174,14 @@
       });
       const weekly = Object.keys(weekBuckets).map(day => ({ day: day, minutes: weekBuckets[day] })).sort((a,b)=>a.day.localeCompare(b.day));
       const completed = goals.filter(g => sessions.filter(p => p.skillId === g.skillId).reduce((n,p)=>n+Number(p.minutes||0),0)/60 >= g.target).length;
-      return { total_minutes: total, total_hours: Math.round(total/6)/10, active_skills: skills.filter(s=>s.status==='ACTIVE').length, skills: skillMinutes, weekly: weekly, streak: streak, goals_total: goals.length, goals_completed: completed, recent: recent.slice(0,5) };
+      let longestStreak = 0, streakRun = 0, previousDay = null;
+      Array.from(new Set(dates)).sort().forEach(day => { const currentDay = new Date(day + 'T00:00:00Z'); streakRun = previousDay && currentDay - previousDay === 86400000 ? streakRun + 1 : 1; longestStreak = Math.max(longestStreak, streakRun); previousDay = currentDay; });
+      const now = new Date();
+      const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+      const monthMinutes = sessions.filter(p => { const when = new Date(p.practicedAt || 0); return when >= monthStart && when <= now; }).reduce((n, p) => n + Number(p.minutes || 0), 0);
+      const monthSeries = [];
+      for (let back = 5; back >= 0; back--) { const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - back, 1)); const end = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1)); monthSeries.push({ month: start.toLocaleString('en-US', { month: 'short', timeZone: 'UTC' }), minutes: sessions.filter(p => { const when = new Date(p.practicedAt || 0); return when >= start && when < end; }).reduce((n,p)=>n+Number(p.minutes||0),0) }); }
+      return { total_minutes: total, total_hours: Math.round(total/6)/10, month_minutes: monthMinutes, month_series: monthSeries, longest_streak: longestStreak, active_skills: skills.filter(s=>s.status==='ACTIVE').length, skills: skillMinutes, weekly: weekly, streak: streak, goals_total: goals.length, goals_completed: completed, recent: recent.slice(0,5) };
     }
     if (path === '/api/feed' && method === 'GET') {
       const snap = await store.getDocs(store.query(store.collection(db, 'posts'), store.orderBy('createdAt', 'desc'), store.limit(30)));
@@ -155,7 +191,7 @@
         const likes = await store.getDocs(store.collection(db, 'posts', item.id, 'likes'));
         const comments = await store.getDocs(store.collection(db, 'posts', item.id, 'comments'));
         const myLike = await store.getDoc(store.doc(db, 'posts', item.id, 'likes', uid));
-        posts.push({ id: item.id, user_id: d.userId, name: d.name, username: d.username, content: d.content, skill_name: d.skill_name || '', media_name: d.mediaUrl || null, created_at: d.createdAt, likes: likes.size, comments: comments.size, liked: myLike.exists() });
+        posts.push({ id: item.id, user_id: d.userId, name: d.name, username: d.username, content: d.content, skill_name: d.skillName || d.skill_name || '', skill_category: d.skillCategory || '', created_at: d.createdAt, likes: likes.size, comments: comments.size, liked: myLike.exists() });
       }
       return posts.sort((a,b)=>new Date(b.created_at)-new Date(a.created_at));
     }
@@ -164,8 +200,11 @@
       if (!content || content.length > 1000) throw new Error('Write a post up to 1,000 characters.');
       const profile = await store.getDoc(store.doc(db, 'profiles', uid));
       const p = profile.data() || {};
+      const skillId = String(body.skill_id || '');
+      const skill = skillId ? await store.getDoc(store.doc(db, 'skills', skillId)) : null;
+      if (skillId && (!skill.exists() || skill.data().userId !== uid)) throw new Error('Choose one of your own skills.');
       const ref = store.doc(store.collection(db, 'posts'));
-      await store.setDoc(ref, { userId: uid, name: p.name || current.displayName || 'Hobbyloop member', username: p.username || 'member', content: content, mediaUrl: body.media_url || null, mediaPath: body.media_path || null, skill_name: '', createdAt: new Date().toISOString() });
+      await store.setDoc(ref, { userId: uid, name: p.name || current.displayName || 'Hobbyloop member', username: p.username || 'member', content: content, skillId: skillId || null, skillName: skill ? skill.data().name : '', skillCategory: skill ? (skill.data().category || 'Other') : '', createdAt: new Date().toISOString() });
       return { id: ref.id };
     }
     if (parts[1] === 'posts' && parts.length === 4 && parts[3] === 'like') {
@@ -194,8 +233,6 @@
       const ref = store.doc(db, 'posts', parts[2]);
       const post = await store.getDoc(ref);
       if (!post.exists() || post.data().userId !== uid) return { ok: false };
-      if (post.data().mediaPath && String(post.data().mediaPath).startsWith('community/' + uid + '/')) {
-      }
       const likes = await store.getDocs(store.collection(db, 'posts', parts[2], 'likes'));
       const comments = await store.getDocs(store.collection(db, 'posts', parts[2], 'comments'));
       const refs = likes.docs.map(d => d.ref).concat(comments.docs.map(d => d.ref), [ref]);
@@ -212,7 +249,6 @@
     api: api
   };
 })();
-
 
 
 

@@ -5,6 +5,7 @@ import unittest
 import uuid
 from pathlib import Path
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 from http.server import ThreadingHTTPServer
 
 from backend import server
@@ -60,26 +61,50 @@ class LocalApiFlowTests(unittest.TestCase):
         skill = self.call_api('/api/skills', 'POST', {
             'name': 'Guitar', 'category': 'Music', 'level': 'BEGINNER'
         }, bearer)
-        goal = self.call_api('/api/goals', 'POST', {
-            'skill_id': skill['id'], 'title': 'Practice one hour', 'target': 1, 'unit': 'hours'
+        updated_skill = self.call_api('/api/skills/' + skill['id'], 'PUT', {
+            'name': 'Acoustic Guitar', 'category': 'Music', 'level': 'INTERMEDIATE',
+            'target_level': 'ADVANCED', 'description': 'Chord transitions', 'status': 'ACTIVE'
         }, bearer)
+        self.assertEqual(updated_skill['name'], 'Acoustic Guitar')
+        self.assertEqual(updated_skill['level'], 'INTERMEDIATE')
+        goal = self.call_api('/api/goals', 'POST', {
+            'skill_id': skill['id'], 'title': 'Practice one hour', 'target': 1, 'unit': 'hours', 'milestones': [20, 60, 100]
+        }, bearer)
+        saved_goal = next(item for item in self.call_api('/api/goals', bearer=bearer) if item['id'] == goal['id'])
+        self.assertEqual(saved_goal['milestones'], [20, 60, 100])
+        self.call_api('/api/goals/' + goal['id'], 'PUT', {
+            'skill_id': skill['id'], 'title': 'One hour of guitar', 'target': 1, 'unit': 'hours', 'milestones': [25, 75, 100]
+        }, bearer)
+        updated_goal = next(item for item in self.call_api('/api/goals', bearer=bearer) if item['id'] == goal['id'])
+        self.assertEqual(updated_goal['title'], 'One hour of guitar')
+        self.assertEqual(updated_goal['milestones'], [25, 75, 100])
         self.call_api('/api/practice', 'POST', {
             'skill_id': skill['id'], 'minutes': 60, 'activity': 'Chord practice'
         }, bearer)
         analytics = self.call_api('/api/analytics/dashboard', bearer=bearer)
         self.assertEqual(analytics['total_minutes'], 60)
+        self.assertEqual(analytics['month_minutes'], 60)
+        self.assertEqual(len(analytics['month_series']), 6)
+        self.assertEqual(analytics['longest_streak'], 1)
         self.assertEqual(analytics['goals_completed'], 1)
         saved_goal = self.call_api('/api/goals', bearer=bearer)[0]
         self.assertEqual(saved_goal['id'], goal['id'])
         self.assertEqual(saved_goal['progress'], 100)
 
-        post = self.call_api('/api/posts', 'POST', {'content': 'First practice update!'}, bearer)
+        post = self.call_api('/api/posts', 'POST', {'content': 'First practice update!', 'skill_id': skill['id']}, bearer)
         self.call_api('/api/posts/' + post['id'] + '/like', 'POST', {}, bearer)
         self.call_api('/api/posts/' + post['id'] + '/comments', 'POST', {'text': 'Keep it up!'}, bearer)
         feed_post = next(item for item in self.call_api('/api/feed', bearer=bearer) if item['id'] == post['id'])
         self.assertEqual(feed_post['likes'], 1)
         self.assertEqual(feed_post['comments'], 1)
+        self.assertEqual(feed_post['skill_name'], 'Acoustic Guitar')
+        self.assertEqual(feed_post['skill_category'], 'Music')
         self.assertTrue(feed_post['liked'])
+        request = Request(self.base + '/api/files/upload', method='POST', headers={'Authorization': 'Bearer ' + bearer})
+        with self.assertRaises(HTTPError) as error:
+            urlopen(request, timeout=5)
+        self.assertEqual(error.exception.code, 404)
+        error.exception.close()
 
 
 class SecurityAndProgressTests(unittest.TestCase):
